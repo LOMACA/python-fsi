@@ -3,7 +3,7 @@ from chebdif import chebdif
 from clencurt import clencurt
 from mean_vel import channelMeanVel
 import matplotlib.pyplot as plt
-from resolvent_compliant import channelResolventCompliant
+from resolvent.resolvent_compliant import channelResolventCompliant
 
 Re =2000
 

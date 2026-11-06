@@ -2,7 +2,7 @@
 of coiling cycles"""
 
 import numpy as np
-from rod_elements import rodElement
+from fea.rod_elements import rodElement
 
 def assemble_structure(EA, rhoA, q1, q2, LUC, nElem, Njunct, kres, mres):
 
