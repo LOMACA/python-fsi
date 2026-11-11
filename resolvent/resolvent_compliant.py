@@ -10,10 +10,10 @@ This particular code performs phase-shifted opposition control on both
 walls '''
 
 import numpy as np
+import scipy.linalg
 
-
-from mean_vel import channelMeanVel
-from compliant_bc import full_channel_compliant_bc
+from resolvent.mean_vel import channelMeanVel
+from resolvent.compliant_bc import full_channel_compliant_bc
 from dataclasses import dataclass
 
 
@@ -24,6 +24,13 @@ class ResolventResult:
     v: np.ndarray    # forcing modes
     fro: float       # Frobenius norm of the weighted resolvent
     H: np.ndarray    # full resolvent, 4N x 4N
+
+def robust_svd(A):
+    """Dense SVD; falls back to LAPACK gesvd if the fast gesdd fails to converge."""
+    try:
+        return np.linalg.svd(A, full_matrices=False)
+    except np.linalg.LinAlgError:
+        return scipy.linalg.svd(A, full_matrices=False, lapack_driver='gesvd')
 
 def channelResolventCompliant(Re, kx, kz, cP, N, nsvd, admittance):
 
@@ -76,7 +83,7 @@ def channelResolventCompliant(Re, kx, kz, cP, N, nsvd, admittance):
 
     H0Wfro = np.linalg.norm(H0W, 'fro')
 
-    u0W, s0W, v0W = np.linalg.svd(H0W, full_matrices=False)
+    u0W, s0W, v0W = robust_svd(H0W)
     u0W = u0W[:, :nsvd]
     s0W = s0W[:nsvd]
     v0W = v0W[:nsvd, :].conj().T
@@ -84,7 +91,7 @@ def channelResolventCompliant(Re, kx, kz, cP, N, nsvd, admittance):
     v0 = isqW @ v0W
     s0 = s0W
 
-    uCW, sCW, vCW = np.linalg.svd(HCW, full_matrices=False)
+    uCW, sCW, vCW = robust_svd(HCW)
     uCW = uCW[:, :nsvd]
     sCW = sCW[:nsvd]
     vCW = vCW[:nsvd, :].conj().T

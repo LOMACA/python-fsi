@@ -1,7 +1,7 @@
 ## Mean velocity calculation based on R-T eddy viscosity model
 import numpy as np
-from chebdif import chebdif
-from clencurt import clencurt
+from resolvent.chebdif import chebdif
+from resolvent.clencurt import clencurt
 
 def channelMeanVel(Re, N):
 
