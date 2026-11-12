@@ -1,4 +1,4 @@
-''' Sweep over (kx, kz, c+) for all walls: metrics per unit forcing + rigid profiles for NNLS '''
+''' Sweep over (kx, kz, c+) for all walls: metrics per unit forcing + profiles of all walls (v2: DNS-matched low k) '''
 
 import os
 for v in ['OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS']:
@@ -29,13 +29,15 @@ if TEST:
     CP = np.array([10.0, 16.0])
     OUT = Path('results') / 'sweep_test'
 else:
-    KX = np.union1d(np.logspace(np.log10(0.5), np.log10(150), 35), [1, 12])      # streamwise wavenumber grid
-    KZ = np.union1d(np.logspace(0, np.log10(800), 40), [10, 120])           # spanwise wavenumber grid
-    CP = np.union1d(np.round(np.linspace(2, 26, 37), 10), [10, 16])       # wavespeed grid
-    OUT = Path('results') / 'sweep'  # output folder
+    KX = np.union1d(0.25 * np.arange(1, 9),  # DNS modes 0.25 ... 2.0
+                    np.union1d(np.logspace(np.log10(2.4), np.log10(150), 25), [12]))
+    KZ = np.union1d((2 / 3) * np.arange(1, 7),  # DNS modes 0.667 ... 4.0
+                    np.union1d(np.logspace(np.log10(4.8), np.log10(800), 30), [10, 120]))
+    CP = np.union1d(np.round(np.linspace(2, 26, 37), 10), [10, 16])  # wavespeed grid (unchanged)
+    OUT = Path('results') / 'sweep_v2'  # new folder
 
 SCALARS = ['s1', 's2', 'RS', 'RS_all', 'eta', 'eta_all', 'p_wall', 'u_max', 'v_max']   # scalar results
-PROFILES = ['uu', 'vv', 'ww', 'uv']         # profiles for spectra and DNS weighting
+PROFILES = ['uu', 'vv', 'ww', 'uv', 'pp']         # profiles for spectra and DNS weighting
 # -----------------------------------------------------------------------
 
 def build_walls():
@@ -60,15 +62,16 @@ def point(kx, kz, cP, Y):
     m = flow_metrics(CON, y, dy, N, kx, cP, RE)
 
     q = CON.u * CON.s                        # sigma_j * psi_j, all ranks response time gain for unit forcing
-    u, v, w = q[:N], q[N:2*N], q[2*N:3*N]    # velocity fields
+    u, v, w, p = q[:N], q[N:2 * N], q[2 * N:3 * N], q[3 * N:4 * N]  # velocity and pressure fields
     uv = np.sum(np.real(np.conj(u) * v), axis=1)   # uv field averaged over x,z, and t (sum over ranks)
     v_wall = np.sqrt(np.sum(np.abs(v[[0, N-1]])**2, axis=1))      # rms v at each wall (top and bottom)
 
     sc = dict(s1=CON.s[0], s2=CON.s[1], RS=m.RS, RS_all=np.sum(uv * (y - 1) * dy),
               eta=m.eta, eta_all=v_wall.max() / (cP*kx/RE),
               p_wall=m.p_wall, u_max=m.u_max, v_max=m.v_max)   # scalars for each wall
-    pr = dict(uu=np.sum(np.abs(u)**2, axis=1), vv=np.sum(np.abs(v)**2, axis=1),
-              ww=np.sum(np.abs(w)**2, axis=1), uv=uv)   # profiles for each wall
+    pr = dict(uu=np.sum(np.abs(u) ** 2, axis=1), vv=np.sum(np.abs(v) ** 2, axis=1),
+              ww=np.sum(np.abs(w) ** 2, axis=1), uv=uv,
+              pp=np.sum(np.abs(p) ** 2, axis=1))  # profiles for each wall
     return sc, pr
 
 
@@ -84,11 +87,11 @@ def solve_task(args):
             rows.append(sc)
             profs.append(pr)
         S = np.array([[r[f] for f in SCALARS] for r in rows])
-        P = np.array([[p[f] for f in PROFILES] for p in profs], dtype=np.float32)
+        P = np.array([[p[f] for f in PROFILES] for p in profs], dtype=np.float32)  # (nW, 5, N)
     except Exception as e:
         print(f'FAILED kx={kx:.4g} kz={kz:.4g} c={cP:.4g}: {e}', flush=True)
         S = np.full((len(Ys), len(SCALARS)), np.nan)
-        P = np.full((len(PROFILES), N), np.nan, dtype=np.float32)
+        P = np.full((len(Ys), len(PROFILES), N), np.nan, dtype=np.float32)  # same shape
     return S, P
 
 
@@ -127,7 +130,7 @@ def main():
             out = list(ex.map(solve_task, tasks, chunksize=4)) # ex.map sends the tasks and to solve_task solves it and out is the of kz*cP pairs (S, P)
 
             S = np.array([o[0] for o in out]).reshape(nkz, nc, nW, nS)   # reshaped scalars ordered according to inner frequency loop for each kz
-            P = np.array([o[1] for o in out]).reshape(nkz, nc, len(PROFILES), N) # reshaped profiles ordered according to inner frequency loop for each kz
+            P = np.array([o[1] for o in out]).reshape(nkz, nc, nW, len(PROFILES), N) # reshaped profiles ordered according to inner frequency loop for each kz
             np.savez(f, S=S, P=P, Y=Yc, skipped=np.abs(Yc) < Y_SKIP)  # saves the chunk
 
             el = time.time() - t_start  # elapsed time
@@ -135,9 +138,10 @@ def main():
 
     # assemble one file
     S = np.stack([np.load(OUT / f'kx_{i:03d}.npz')['S'] for i in range(len(KX))])   # after the loop reshape the scalar chunks into (nkx,nkz,nc,nW,nS)
-    P = np.stack([np.load(OUT / f'kx_{i:03d}.npz')['P'] for i in range(len(KX))])   # after the loop reshape the profile chunks into (nkx,nkz,nc,nP,y)
+    #P = np.stack([np.load(OUT / f'kx_{i:03d}.npz')['P'] for i in range(len(KX))])   # after the loop reshape the profile chunks into (nkx,nkz,nc,nP,y)
     Y = np.stack([np.load(OUT / f'kx_{i:03d}.npz')['Y'] for i in range(len(KX))])   # after the loop reshape the admittance chunks into (nkx,nc,nW)
-    np.savez(OUT / 'sweep_all.npz', S=S, P=P, Y=Y) # write and save results
+    #np.savez(OUT / 'sweep_all.npz', S=S, P=P, Y=Y) # write and save results
+    np.savez(OUT / 'sweep_all.npz', S=S, Y=Y)
 
     # check for NW and VLSM modes to match the main_modes output script
     iRS = SCALARS.index('RS')
