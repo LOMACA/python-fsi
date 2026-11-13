@@ -77,6 +77,7 @@ print(f"First antiresonance {f[tr[0]]:.1f} Hz (target 555)")
 eta_modal, modes = modalFRF(M, C, K, freeDoF, junctNodes[[0, 2, 4, 6]], omega)
 print("Max relative difference:", np.max(np.abs(eta_modal - eta[3])/np.abs(eta[3])))
 print("Modal coupling:", modes.coupling)
+print('First few SR modes:', modes.Omega[:6])
 
 # Fig. 2(b), (c): uncoiled and 3 cycles
 fig, ax = plt.subplots(2, 1, sharex=True, figsize=(7, 6))
@@ -114,3 +115,24 @@ print("Antiresonance:", np.sqrt(W2_anti[0])/(2*np.pi))
 
 rel = np.abs(eta_modal - eta[3])/np.abs(eta[3])
 print("Worst at", f[np.argmax(rel)], "Hz")
+
+from fsi.walls import Flow, sr
+
+Re_tau, H = 2000, 0.05            # same values as RE, H in main_sweeps
+flow = Flow(Re_tau=Re_tau, h=H)
+
+for n in (0, 3):
+    m = sr(flow, n).modes        # wall units
+    print(f'\nSR {n} cyc')
+    print(f'{"mode":>4} {"Omega+":>10} {"r":>11} {"1/r":>11} {"zeta":>10} {"c_res(kx=12)":>13}')
+    for j, (O, r, z) in enumerate(zip(m.Omega[:6], m.r[:6], m.zeta[:6]), start=1):
+        print(f'{j:4d} {O:10.4f} {r:11.3e} {1/r:11.3e} {z:10.2e} {O*Re_tau/12:13.2f}')
+
+
+O, r, z = m.Omega[0], m.r[0], m.zeta[0]
+
+def Y1(w):
+    return 1j * w * np.conj(r / (O**2 - w**2 + 2j*z*O*w))
+
+print('|Y| at resonance :', abs(Y1(O)))
+print('|Y| at Omega/2   :', abs(Y1(O/2)), Y1(O/2))

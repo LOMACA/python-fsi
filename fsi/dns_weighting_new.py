@@ -8,11 +8,15 @@ from scipy.interpolate import interp1d
 sys.path.insert(0, r'C:\Users\uqlcapp1\Simulations\DNS\code')        # folder with dns_tools.py
 from dns_tools import HJ_SPECS, load_spectrum_2d, read_fortran_records
 from scipy.optimize import nnls
+from scipy.interpolate import RegularGridInterpolator
+from scipy.ndimage import gaussian_filter
 
 # --------------------------------- SETTINGS ---------------------------------
 Re = 2000                                                  # DNS case
 ROOT = Path(__file__).resolve().parent.parent              # fsi -> Python (project root)
-SWEEP = ROOT / 'results' / 'sweep'                         # resolvent sweep folder
+SWEEP = ROOT / 'results' / 'sweep_v2'                      # resolvent sweep folder
+WALL_CHECK = 'SR 3 cyc matched'          # v2;  for v3: 'modal m=1e+04 z=3e-02' (check names in meta)
+#WALL_CHECK = 'modal m=1e+04 z=3e-02'
 VARS = ['uu', 'vv', 'ww', 'uv']                            # spectra to read
 SHOW_CHECKS = False                                        # True: run the file exploration and spectrum plots
 # ----------------------------------------------------------------------------
@@ -67,8 +71,6 @@ if SHOW_CHECKS:
     fig.colorbar(cs)
 
     # log-polar spectrum (Lee & Moser 2019, eq. 2.27)
-    from scipy.interpolate import RegularGridInterpolator
-    from scipy.ndimage import gaussian_filter
     KREF = 1/50000                                         # k_ref+
     d = 0.01                                               # grid spacing in kx#, kz#
     g = np.arange(0, 4.9 + d/2, d)
@@ -187,13 +189,6 @@ w = T_cell / T_tot
 print(f'T_tot = {T_tot:.4f},   sum of w over the sweep cells = {w.sum():.4f}')
 
 uvE = E[:, iuv]                                            # (20, 653, 1308): cropped DNS uv per bin
-parts = {'kx = 0':                uvE[:, 0, :].sum(axis=1),          # DNS kx index 0
-         'kx = 0.25':             uvE[:, 1, :].sum(axis=1),          # DNS kx index 1
-         'kz = 0, 0.667 (kx>=0.5)': uvE[:, 2:, :2].sum(axis=(1, 2))} # kz indices 0, 1, rest of kx
-for name, prof in parts.items():
-    Tp = 3 / Re_tau * np.trapezoid(fik * -np.concatenate([[0.0], prof]), yw)
-    print(f'{name:24s}: {Tp / T_tot:.3f} of T_tot')
-
 
 # ============================ G. RESOLVENT GRID -> DNS HEIGHTS ============================
 y, N = M['y'], int(M['N'])
@@ -211,16 +206,18 @@ def to_planes(Pr):
     bot = interp1d(eta_bot, Pr[..., mid:][..., ::-1], axis=-1)(eta_d)
     return 0.5 * (bot + SIGN * top)
 
-
 # ============================ H. RIGID PROFILES OF ALL CHUNKS ============================
 Rp = np.full((len(KX), len(KZ), len(CP), 4, len(yp)), np.nan)   # rigid profiles at the DNS planes
 for i in range(len(KX)):
     f = SWEEP / f'kx_{i:03d}.npz'
     if f.exists():
-        Pc = np.load(f)['P']
-        if Pc.ndim == 5:                                   # v2: (nkz, nc, nW, 5, N) -> rigid wall only
+        d = np.load(f)
+        CPk = d['cP'] if 'cP' in d.files else CP             # v3: per-kx grid, v1/v2: base grid
+        ib = np.array([np.flatnonzero(np.isclose(CPk, c))[0] for c in CP])   # base speeds inside CPk
+        Pc = d['P']
+        if Pc.ndim == 5:                                     # v2/v3: (nkz, nck, nW, 5, N) -> rigid wall
             Pc = Pc[:, :, 0]
-        Rp[i] = to_planes(Pc[..., :4, :])                  # uu, vv, ww, uv -> (nkz, nc, 4, 20)                 # (nkz, nc, 4, N) -> (nkz, nc, 4, 20) -> resolvent to DNS planes
+        Rp[i] = to_planes(Pc[:, ib, :4, :])                  # (nkz, nc, 4, 20) on the base grid                 # uu, vv, ww, uv -> (nkz, nc, 4, 20)                 # (nkz, nc, 4, N) -> (nkz, nc, 4, 20) -> resolvent to DNS planes
 done = ~np.isnan(Rp[:, 0, 0, 0, 0])
 print(f'{done.sum()} of {len(KX)} kx chunks loaded,  Rp shape {Rp.shape}')
 
@@ -247,8 +244,7 @@ for ax, (name, kx0, kz0, cs) in zip(axes, [('NW', 12, 120, [4, 8, 10, 14, 20]),
     ax.legend(fontsize=8)
 fig.tight_layout()
 
-# ============================ I. FIT CP SPECTRUM OF RESOLVENT CELLS TO DNS ============================
-
+# ============================ I. FIT CP VALUES OF RESOLVENT CELLS TO DNS ============================
 ALPHA = 0.05
 
 def fit_cell(a, b):
@@ -295,4 +291,117 @@ for row, (name, kx0, kz0) in enumerate([('NW', 12, 120), ('VLSM', 1, 10)]):
     print(f'{name}: sum X_c T_c = {np.sum(X * T_c):.3e}   vs   T_cell = {T_cell[a, b]:.3e}')
 fig.tight_layout()
 plt.show()
+
+# ============================ J. FIT ALL CELLS ============================
+
+nkx, nkz, nc = len(KX), len(KZ), len(CP)
+X = np.zeros((nkx, nkz, nc))                        # forcing per cell and speed
+res = np.full((nkx, nkz), np.nan)             # relative misfit per cell
+
+for a in range(nkx):
+    for b in range(nkz):
+
+        X[a, b], res[a, b], _ = fit_cell(a, b)
+
+uvR = np.nan_to_num(Rp[..., iuv, :])                # rigid uv profiles
+uvR = np.concatenate([np.zeros(uvR.shape[:-1] + (1,)), uvR], axis=-1)   # uv = 0 at the wall
+
+T_c = 3/ Re_tau * np.trapezoid(fik * -uvR, yw, axis = -1)
+
+ok = ~np.isnan(res)
+print(f'fitted {ok.sum()} of {res.size} cells')
+print(f'w-weighted mean residual: {np.sum(w[ok] * res[ok]) / np.sum(w[ok]):.3f}')
+print(f'sum X_c T_c / sum T_cell: {np.sum(X * T_c) / T_cell.sum():.4f}')
+
+
+# ============================ K. SUM OVER ALL CELLS ============================`
+def cell_widths(c):                                          # midpoint cells: any spacing
+    e = np.concatenate([[c[0] - (c[1] - c[0]) / 2], (c[1:] + c[:-1]) / 2,
+                        [c[-1] + (c[-1] - c[-2]) / 2]])
+    return np.diff(e)
+
+nW, nS = len(M['walls']), len(M['scalars'])
+S_all = CPall = None
+for a in range(nkx):
+    f = SWEEP / f'kx_{a:03d}.npz'
+    if f.exists():
+        d = np.load(f)
+        CPk = d['cP'] if 'cP' in d.files else CP
+        if S_all is None:                                    # allocate once the chunk size is known
+            S_all = np.full((nkx, nkz, len(CPk), nW, nS), np.nan)
+            CPall = np.full((nkx, len(CPk)), np.nan)
+        S_all[a], CPall[a] = d['S'], CPk
+print('S_all', S_all.shape, '  c points per kx:', CPall.shape[1])
+
+# forcing on each chunk's own c grid
+dc0 = cell_widths(CP)
+Xk = np.zeros((nkx, nkz, CPall.shape[1]))
+for a in range(nkx):
+    if np.isnan(CPall[a]).any():
+        continue
+    dck = cell_widths(CPall[a])
+    for b in range(nkz):
+        xd = X[a, b] / dc0                                   # forcing per unit c
+        Xk[a, b] = np.interp(CPall[a], CP, xd, left=0, right=0) * dck
+print(f'forcing kept after regridding: {Xk.sum() / X.sum():.4f}')   # 1 up to interpolation
+
+RS = S_all[..., list(M['scalars']).index('RS_all')]
+num = np.sum(Xk[..., None] * RS, axis=2)
+den = num[..., 0]
+J = num / den[..., None]
+bad = np.isnan(J[..., 0])
+J = np.nan_to_num(J, nan=1.0)
+print('Entries of J:', J[...,0])
+print('max deviation of J from 1:', np.abs(J[...,0] - 1).max())
+a, b = np.argmin(abs(KX - 12)), np.argmin(abs(KZ - 120))      # indices of the NW cell
+print(f'NW cell (kx = {KX[a]:.2f}, kz = {KZ[b]:.1f}), w = {w[a, b]:.2e}')
+for name, j in zip(M['walls'], J[a, b]):
+    print(f'   {name:20s} J = {j:.4f}')
+
+k = list(M['walls']).index('SR 3 cyc matched')
+RS_lead = S_all[..., list(M['scalars']).index('RS')]      # leading pair only
+
+ratio_all  = RS[a, b, :, k] / RS[a, b, :, 0]              # all ranks (what J uses)
+ratio_lead = RS_lead[a, b, :, k] / RS_lead[a, b, :, 0]
+stress = X[a, b] * T_c[a, b]                              # stress carried per c
+
+# --- check 1: ratio vs c on top of where the stress sits ---
+fig, ax = plt.subplots(figsize=(7, 4))
+ax.bar(CP, stress, width=0.5, color='0.8', label=r'$X_c T_c$')
+ax.set_xlabel(r'$c^+$'); ax.set_ylabel(r'$X_c T_c$')
+ax2 = ax.twinx()
+ax2.plot(CP, ratio_all, 'C0o-', ms=3, label='RS rank 10 ratio')
+ax2.plot(CP, ratio_lead, 'C1s--', ms=3, label='RS (leading = rank 2) ratio')
+ax2.axhline(1, color='k', lw=0.8)
+ax2.set_ylabel(r'$RS_{wall}/RS_{rigid}$')
+ax.set_title(f'{M["walls"][k]}, kx = {KX[a]:.2f}, kz = {KZ[b]:.1f}')
+fig.legend(loc='upper right'); fig.tight_layout(); plt.show()
+
+# --- check 2: leading vs all ranks at c = 10 ---
+ic = np.argmin(abs(CP - 10))
+print(f'c = {CP[ic]:.2f}: RS_all ratio = {ratio_all[ic]:.4f}, '
+      f'RS leading ratio = {ratio_lead[ic]:.4f}, cell J = {J[a, b, k]:.4f}')
+
+k = list(M['walls']).index(WALL_CHECK)
+RS_lead = S_all[..., list(M['scalars']).index('RS')]
+ca = CPall[a]                                                # this kx's speeds
+ratio_all  = RS[a, b, :, k] / RS[a, b, :, 0]
+ratio_lead = RS_lead[a, b, :, k] / RS_lead[a, b, :, 0]
+stress = X[a, b] * T_c[a, b]                                 # base grid (bars)
+...
+ax.bar(CP, stress, width=0.5, color='0.8', label=r'$X_c T_c$')
+ax2.plot(ca, ratio_all, 'C0o-', ms=3, label='RS rank 10 ratio')
+ax2.plot(ca, ratio_lead, 'C1s--', ms=3, label='RS (leading = rank 2) ratio')
+if 'omega_t' in M.files:                                     # v3+: modal target known
+    ax2.axvline(M['omega_t'] * Re_tau / KX[a], color='r', ls=':', label=r'$c_{res}$')
+...
+ic = np.argmin(abs(ca - 10))
+print(f'c = {ca[ic]:.2f}: RS_all ratio = {ratio_all[ic]:.4f}, '
+      f'RS leading ratio = {ratio_lead[ic]:.4f}, cell J = {J[a, b, k]:.4f}')
+
+DR = np.sum(T_cell[..., None] * (1 - J), axis=(0, 1))     # T_tot is already inside T_cell
+for name, d in zip(M['walls'], DR): print(f'   {name:20s} DR = {100*d:+.3f} %')
+np.savez(ROOT / 'results' / f'dns_weights_{SWEEP.name}.npz', X=X, Xk=Xk, CPall=CPall, w=w,
+         T_cell=T_cell, T_c=T_c, T_tot=T_tot, KX=KX, KZ=KZ, CP=CP)
+
 

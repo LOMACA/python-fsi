@@ -1,6 +1,6 @@
 import numpy as np
 
-from fsi.walls import Flow, rigid, sr, default_walls
+from fsi.walls import Flow, rigid, sr, default_walls, modal
 from fea.assemble_coiled_MM_structure import assemble_structure
 from fea.coil_rod import coilRod
 
@@ -35,3 +35,19 @@ for n in [0, 3]:
     Y_ref = 1j * wP * np.conj(eta_SI * flow.rho_f * flow.u_tau**3 / flow.nu)
     Y_wall = sr(flow, n).Y(wP)[0]
     print(f'SR {n} cyc rel. error:', abs(Y_wall - Y_ref) / abs(Y_ref))
+
+import numpy as np, matplotlib.pyplot as plt
+from fsi.walls import Flow, sr, modal
+
+flow = Flow(Re_tau=2000, h=0.05)                      # H as in main_sweeps
+S3 = sr(flow, 3); m = S3.modes
+O, r, z = m.Omega[0], m.r[0], m.zeta[0]
+W = modal(O, 1/r, z)
+
+w = O * np.sort(np.concatenate([np.linspace(0.5, 1.5, 2001), np.linspace(0.999, 1.001, 2001)]))
+Y1 = 1j*w*np.conj(r / (O**2 - w**2 + 2j*z*O*w))
+print('modal vs closed form, max rel err:', np.max(np.abs(W.Y(w) - Y1) / np.abs(Y1)))
+
+plt.semilogy(w/O, abs(S3.Y(w)), label='SR 3 cyc (all modes)')
+plt.semilogy(w/O, abs(W.Y(w)), '--', label='modal, mode 1 only')
+plt.xlabel(r'$\omega/\Omega$'); plt.ylabel('|Y|'); plt.legend(); plt.show()

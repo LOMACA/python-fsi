@@ -18,6 +18,7 @@ class modalFRFResult:
     zeta: np.ndarray
     c: np.ndarray
     coupling: float
+    m_eff: np.ndarray
 
 
 def modalFRF(M, C, K, freeDoF, activeDoF, omega, nModes=None, residual=False):
@@ -55,6 +56,8 @@ def modalFRF(M, C, K, freeDoF, activeDoF, omega, nModes=None, residual=False):
 
         eta = eta + np.sum(r[nModes:] / Omega[nModes:] ** 2)
 
-    modes = modalFRFResult(Omega=Omega, r=r, zeta=zeta,c=c, coupling=coupling)
+    m_eff = 1 / r
+
+    modes = modalFRFResult(Omega=Omega, r=r, zeta=zeta,c=c, coupling=coupling, m_eff=m_eff)
 
     return eta, modes

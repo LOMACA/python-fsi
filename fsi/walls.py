@@ -6,6 +6,7 @@ from fea.assemble_coiled_MM_structure import assemble_structure
 from fea.assemble_defect_RPM_structure import assemble_defect_chain
 from fea.modal_analysis import modalFRF
 from fsi.struct_admittance import structAdmittance
+from fea.modal_analysis import modalFRF, modalFRFResult
 
 
 @dataclass
@@ -98,3 +99,18 @@ def sr(flow, nCycles=0, omega_tar=None, m_tar=None,
 def default_walls(flow):
 
     return [rigid(), rpm(), sr(flow, 0), sr(flow, 3)]
+
+def modal(Omega, m_eff, zeta):
+
+    r = 1 / m_eff
+    M = np.array([[m_eff]])
+    K = np.array([[m_eff * Omega**2]])
+    C = np.array([[2 * zeta * Omega * m_eff]])
+    dof = np.array([0])
+
+    def Y(wP):
+        return structAdmittance(M, C, K, dof, dof, wP, 1.0)
+
+    modes = modalFRFResult(Omega=np.array([Omega]), r=np.array([r]), zeta=np.array([zeta]),
+                           c=np.array([2*zeta*Omega]), coupling=0.0, m_eff=np.array([m_eff]))
+    return Wall(f'modal m={m_eff:.0e} z={zeta:.0e}', Y, Omega, 1.0, modes)

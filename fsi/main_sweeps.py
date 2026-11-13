@@ -22,6 +22,11 @@ RE, H = 2000, 0.05                           # Re_tau, channel half-height [m]
 N, NSVD = 201, 10                            # grid points, SVD ranks
 Y_SKIP = 1e-4                                # |Y+| below this -> copy rigid result instead of computing it
 N_WORKERS = max(1, (os.cpu_count() or 2) - 1)  # one core left for other stuff
+OMEGA_T = 0.12                       # modal target frequency, omega+
+M_EFF   = [1e3, 1e4, 1e5, 1e6]       # modal mass per unit area, wall units
+ZETA    = [0.01, 0.03, 0.1]          # modal damping ratio
+REFINE = np.exp([-0.25, -0.12, -0.06, -0.03, -0.015, -0.005, 0,
+                  0.005, 0.015, 0.03, 0.06, 0.12, 0.25])   # log offsets around c_res, same count every kx
 
 if TEST:
     KX = np.array([1.0, 12.0])
@@ -34,7 +39,7 @@ else:
     KZ = np.union1d((2 / 3) * np.arange(1, 7),  # DNS modes 0.667 ... 4.0
                     np.union1d(np.logspace(np.log10(4.8), np.log10(800), 30), [10, 120]))
     CP = np.union1d(np.round(np.linspace(2, 26, 37), 10), [10, 16])  # wavespeed grid (unchanged)
-    OUT = Path('results') / 'sweep_v2'  # new folder
+    OUT = Path('results') / 'sweep_v3'  # new folder
 
 SCALARS = ['s1', 's2', 'RS', 'RS_all', 'eta', 'eta_all', 'p_wall', 'u_max', 'v_max']   # scalar results
 PROFILES = ['uu', 'vv', 'ww', 'uv', 'pp']         # profiles for spectra and DNS weighting
@@ -42,13 +47,13 @@ PROFILES = ['uu', 'vv', 'ww', 'uv', 'pp']         # profiles for spectra and DNS
 
 def build_walls():
 
-    from fsi.walls import Flow, rigid, rpm, sr
+    from fsi.walls import Flow, rigid, sr, modal
 
     flow = Flow(Re_tau=RE, h=H)
-    R = rpm()
-    target = dict(omega_tar=R.w_res, m_tar=1/(R.A * R.modes.r[0]))
-    walls = [rigid(), R, sr(flow, 0), sr(flow, 3),
-             sr(flow, 0, **target), sr(flow, 3, **target)]
+    #R = rpm()
+    #target = dict(omega_tar=R.w_res, m_tar=1/(R.A * R.modes.r[0]))
+    walls = [rigid(), sr(flow, 0), sr(flow, 3)]
+    walls += [modal(OMEGA_T, m, z) for m in M_EFF for z in ZETA]
     assert walls[0].name == 'Rigid'
 
     EPS = 1e-3
@@ -104,14 +109,14 @@ def main():
 
     _, _, y, _, _, dy, U = channelResolventCompliant(RE, 12.0, 120.0, 10.0, N, NSVD, 0.0) # run one mode for grid and U
     np.savez(OUT / 'meta.npz', kx=KX, kz=KZ, cP=CP, walls=names, scalars=SCALARS,
-             profiles=PROFILES, Re=RE, h=H, N=N, nsvd=NSVD, Y_skip=Y_SKIP, y=y, dy=dy, U=U)  # write metadata
+             profiles=PROFILES, Re=RE, h=H, N=N, nsvd=NSVD, Y_skip=Y_SKIP, y=y, dy=dy, U=U, omega_t=OMEGA_T, m_eff=M_EFF, zeta=ZETA)  # write metadata
 
     # timing test for full sweep duration estimate
     wP = 10*12/RE
     t0 = time.time()
     solve_task((12.0, 120.0, 10.0, [w.Y(wP)[0] for w in walls]))
     t1 = time.time() - t0
-    n_pts = len(KX) * nkz * nc
+    n_pts = len(KX) * nkz * (nc + len(REFINE))
     print(f'{n_pts} points, {nW} walls, {N_WORKERS} workers')
     print(f'one point: {t1:.2f} s  ->  estimate {t1*n_pts/N_WORKERS/3600:.1f} h', flush=True)
 
@@ -124,29 +129,33 @@ def main():
                 print(f'kx = {kx:.3f} done already, skipped', flush=True)
                 continue
 
-            wP = CP * kx / RE   # frequencies of all kx waves in this chunk
+            CPk = np.sort(np.concatenate([CP, OMEGA_T * RE / kx * REFINE]))    # base grid + resonance points
+            nck = len(CPk)
+            wP = CPk * kx / RE   # frequencies of all kx waves in this chunk
             Yc = np.array([w.Y(wP) for w in walls]).T  # each walls admittance at all cP frequencies
-            tasks = [(kx, kz, c, Yc[l]) for kz in KZ for l, c in enumerate(CP)]  # kz*cp task tuples
+            tasks = [(kx, kz, c, Yc[l]) for kz in KZ for l, c in enumerate(CPk)]  # kz*cp task tuples
             out = list(ex.map(solve_task, tasks, chunksize=4)) # ex.map sends the tasks and to solve_task solves it and out is the of kz*cP pairs (S, P)
 
-            S = np.array([o[0] for o in out]).reshape(nkz, nc, nW, nS)   # reshaped scalars ordered according to inner frequency loop for each kz
-            P = np.array([o[1] for o in out]).reshape(nkz, nc, nW, len(PROFILES), N) # reshaped profiles ordered according to inner frequency loop for each kz
-            np.savez(f, S=S, P=P, Y=Yc, skipped=np.abs(Yc) < Y_SKIP)  # saves the chunk
+            S = np.array([o[0] for o in out]).reshape(nkz, nck, nW, nS)   # reshaped scalars ordered according to inner frequency loop for each kz
+            P = np.array([o[1] for o in out]).reshape(nkz, nck, nW, len(PROFILES), N) # reshaped profiles ordered according to inner frequency loop for each kz
+            np.savez(f, S=S, P=P, Y=Yc, cP=CPk, skipped=np.abs(Yc) < Y_SKIP)  # saves the chunk
 
             el = time.time() - t_start  # elapsed time
             print(f'[{i+1}/{len(KX)}] kx = {kx:8.3f}   elapsed {el/3600:.2f} h', flush=True)
 
     # assemble one file
+    CPall = np.stack([np.load(OUT / f'kx_{i:03d}.npz')['cP'] for i in range(len(KX))])  # (nkx, nck)
     S = np.stack([np.load(OUT / f'kx_{i:03d}.npz')['S'] for i in range(len(KX))])   # after the loop reshape the scalar chunks into (nkx,nkz,nc,nW,nS)
     #P = np.stack([np.load(OUT / f'kx_{i:03d}.npz')['P'] for i in range(len(KX))])   # after the loop reshape the profile chunks into (nkx,nkz,nc,nP,y)
     Y = np.stack([np.load(OUT / f'kx_{i:03d}.npz')['Y'] for i in range(len(KX))])   # after the loop reshape the admittance chunks into (nkx,nc,nW)
     #np.savez(OUT / 'sweep_all.npz', S=S, P=P, Y=Y) # write and save results
-    np.savez(OUT / 'sweep_all.npz', S=S, Y=Y)
+    np.savez(OUT / 'sweep_all.npz', S=S, Y=Y, cP=CPall)
 
     # check for NW and VLSM modes to match the main_modes output script
     iRS = SCALARS.index('RS')
     for name, (kx, kz, c) in {'NW': (12, 120, 10), 'VLSM': (1, 10, 16)}.items():
-        a, b, l = np.argmin(abs(KX-kx)), np.argmin(abs(KZ-kz)), np.argmin(abs(CP-c))
+        a, b = np.argmin(abs(KX - kx)), np.argmin(abs(KZ - kz))
+        l = np.argmin(abs(CPall[a] - c))
         r = S[a, b, l, :, iRS] / S[a, b, l, 0, iRS]
         print(f'{name}: RS/RS_rig = ' + ', '.join(f'{n} {x:.4f}' for n, x in zip(names, r)))
 
