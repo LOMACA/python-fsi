@@ -23,7 +23,7 @@ N, NSVD = 201, 10                            # grid points, SVD ranks
 Y_SKIP = 1e-4                                # |Y+| below this -> copy rigid result instead of computing it
 N_WORKERS = max(1, (os.cpu_count() or 2) - 1)  # one core left for other stuff
 OMEGA_T = 0.12                       # modal target frequency, omega+
-M_EFF   = [1e3, 1e4, 1e5, 1e6]       # modal mass per unit area, wall units
+M_EFF   = [1e2, 1e3, 1e4, 1e5]       # modal mass per unit area, wall units
 ZETA    = [0.01, 0.03, 0.1]          # modal damping ratio
 REFINE = np.exp([-0.25, -0.12, -0.06, -0.03, -0.015, -0.005, 0,
                   0.005, 0.015, 0.03, 0.06, 0.12, 0.25])   # log offsets around c_res, same count every kx
